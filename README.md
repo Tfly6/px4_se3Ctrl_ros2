@@ -1,6 +1,6 @@
-# se3_hopf
+# se3_ctrl
 
-`se3_hopf` 已改为 ROS 2 Humble 节点，面向 PX4 + Micro XRCE Agent 的 Offboard 控制链路。
+`se3_ctrl` 面向 PX4 ROS2(Humble) + Micro XRCE Agent 的 Offboard 控制链路。
 
 当前版本特性：
 
@@ -46,24 +46,47 @@
 
 两种模式都使用算法输出的归一化推力，并映射到 PX4 期望的 `thrust_body[2]`。
 
+## 下载
+
+```bash
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone https://github.com/Tfly6/px4_se3Ctrl_ros2.git
+# px4_msgs 包必须要装上，如果有可以跳过下载 
+git clone https://github.com/PX4/px4_msgs.git
+```
+
 ## 编译
 
 ```bash
 cd ~/ros2_ws
-colcon build --packages-select se3_hopf
+colcon build
+#colcon build --packages-select se3_hopf
 source install/setup.bash
 ```
 
 ## 启动
-
+**打开QGC地面站**  
+- 启动 PX4 SITL
 ```bash
+cd <PX4_DIR>
+make px4_sitl gz_x500
+```
+- 启动通信
+```bash
+MicroXRCEAgent udp4 -p 8888
+```
+- 启动控制器
+```bash
+cd ~/ros2_ws
+source install/setup.bash
 ros2 launch se3_hopf se3_hopf.launch.py
 ```
 
 或直接运行：
 
 ```bash
-ros2 run se3_hopf se3_hopf_node --ros-args --params-file src/Diff-Planner-PX4/src/se3_hopf/config/default.yaml
+ros2 run se3_hopf se3_hopf_node --ros-args --params-file src/px4_se3Ctrl_ros2/config/default.yaml
 ```
 
 ## 常用参数
@@ -79,3 +102,7 @@ ros2 run se3_hopf se3_hopf_node --ros-args --params-file src/Diff-Planner-PX4/sr
 - `geo_fence.x/y/z`
 
 参数默认值见 [config/default.yaml](./config/default.yaml)。
+
+## 参考
+[HITSZ-MAS/se3_controller: SE(3) Controller for Quadrotor](https://github.com/HITSZ-MAS/se3_controller)  
+[Tfly6/OpenDrone: PX4 and ROS1 SITL](https://github.com/Tfly6/OpenDrone)
