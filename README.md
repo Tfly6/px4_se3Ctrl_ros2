@@ -9,7 +9,7 @@
   - `/fmu/out/vehicle_attitude`
   - `/fmu/out/vehicle_angular_velocity`
   - `/fmu/out/vehicle_imu`
-  - `/fmu/out/vehicle_status`
+  - `/fmu/out/vehicle_status_v1`
 - 订阅上层轨迹：
   - `/command/trajectory` (`trajectory_msgs/msg/MultiDOFJointTrajectory`)
 - 发布 Offboard 控制：
@@ -39,7 +39,7 @@
 
 通过参数 `control_mode` 选择：
 
-- `attitude`
+- `attitude` (默认)
   - 发布 `px4_msgs/msg/VehicleAttitudeSetpoint`
 - `body_rate`
   - 发布 `px4_msgs/msg/VehicleRatesSetpoint`
@@ -66,6 +66,8 @@ source install/setup.bash
 ```
 
 ## 启动
+> 启动之前必须确保官方 ROS2 Offboard 案例是可以跑通的
+
 **打开QGC地面站**  
 - 启动 PX4 SITL
 ```bash
