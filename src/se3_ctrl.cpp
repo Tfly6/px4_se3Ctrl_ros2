@@ -406,18 +406,18 @@ void Se3HopfCtrl::execFSMCallback()
 		Controller_Output_t output;
 		if (se3_hopf_.calControl(odom_data_, imu_data_, desired_state_, output)) {
 			sendCommand(output, command_mode_ == CommandMode::Attitude);
-			RCLCPP_INFO_THROTTLE(
-				get_logger(),
-				*get_clock(),
-				1000,
-				"%s z=%.2f z_sp=%.2f thrust=%.3f rates=[%.2f %.2f %.2f]",
-				flight_state_ == TAKEOFF ? "TAKEOFF" : "MISSION",
-				odom_data_.p(2),
-				desired_state_.p(2),
-				output.thrust,
-				output.bodyrates(0),
-				output.bodyrates(1),
-				output.bodyrates(2));
+			// RCLCPP_INFO_THROTTLE(
+			// 	get_logger(),
+			// 	*get_clock(),
+			// 	1000,
+			// 	"%s z=%.2f z_sp=%.2f thrust=%.3f rates=[%.2f %.2f %.2f]",
+			// 	flight_state_ == TAKEOFF ? "TAKEOFF" : "MISSION",
+			// 	odom_data_.p(2),
+			// 	desired_state_.p(2),
+			// 	output.thrust,
+			// 	output.bodyrates(0),
+			// 	output.bodyrates(1),
+			// 	output.bodyrates(2));
 			se3_hopf_.estimateTa(imu_data_.a);
 		} else {
 			RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Control output not valid, sending neutral command.");
@@ -524,6 +524,7 @@ void Se3HopfCtrl::multiDOFJointCallback(const trajectory_msgs::msg::MultiDOFJoin
 		RCLCPP_WARN(get_logger(), "Received empty trajectory message.");
 		return;
 	}
+	RCLCPP_INFO_ONCE(get_logger(), "Received trajectory message with %zu points.", msg->points.size());
 
 	const auto &pt = msg->points.front();
 	const auto &transform = pt.transforms.front();

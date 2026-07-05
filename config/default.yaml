@@ -13,9 +13,9 @@ se3_hopf_node:
     hover_percent: 0.25
     max_hover_percent: 0.75
 
-    geo_fence.x: 10.0
-    geo_fence.y: 10.0
-    geo_fence.z: 6.0
+    geo_fence.x: 80.0
+    geo_fence.y: 80.0
+    geo_fence.z: 7.0
 
     kp_px: 0.85
     kp_py: 0.85
