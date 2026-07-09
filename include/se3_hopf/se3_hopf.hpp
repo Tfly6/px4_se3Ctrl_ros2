@@ -13,6 +13,7 @@
 #include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <px4_msgs/msg/vehicle_imu.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/sensor_combined.hpp>
 
 #include "se3_hopf/utils.hpp"
 
@@ -145,6 +146,35 @@ struct Imu_Data_t
 		} else {
 			a.setZero();
 		}
+
+		const Eigen::Matrix3d body_rotation = Odom_Data_t::frdFluRotation();
+		const Eigen::Matrix3d world_rotation = Odom_Data_t::nedEnuRotation();
+		const Eigen::Matrix3d px4_rotation = q.toRotationMatrix();
+		q = Eigen::Quaterniond(world_rotation * px4_rotation * body_rotation);
+		q.normalize();
+		w = body_rotation * w;
+		a = body_rotation * a;
+	}
+
+	void feed(
+		const px4_msgs::msg::VehicleAttitude &attitude_msg,
+		const px4_msgs::msg::SensorCombined &sensor_msg)
+	{
+		rcv_stamp = std::chrono::steady_clock::now();
+		recv_new_msg = true;
+		recv_attitude = true;
+		recv_angular_velocity = true;
+		recv_linear_acceleration = true;
+
+		q = Eigen::Quaterniond(
+			attitude_msg.q[0],
+			attitude_msg.q[1],
+			attitude_msg.q[2],
+			attitude_msg.q[3]);
+		q.normalize();
+
+		w << sensor_msg.gyro_rad[0], sensor_msg.gyro_rad[1], sensor_msg.gyro_rad[2];
+		a << sensor_msg.accelerometer_m_s2[0], sensor_msg.accelerometer_m_s2[1], sensor_msg.accelerometer_m_s2[2];
 
 		const Eigen::Matrix3d body_rotation = Odom_Data_t::frdFluRotation();
 		const Eigen::Matrix3d world_rotation = Odom_Data_t::nedEnuRotation();

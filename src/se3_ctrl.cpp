@@ -32,6 +32,21 @@ double saturate(double value, double min_value, double max_value)
 	return std::max(min_value, std::min(max_value, value));
 }
 
+double rad2deg(double radians)
+{
+	return radians * 180.0 / M_PI;
+}
+
+double quaternion_angle_deg(Eigen::Quaterniond lhs, Eigen::Quaterniond rhs)
+{
+	lhs.normalize();
+	rhs.normalize();
+	Eigen::Quaterniond dq = lhs.conjugate() * rhs;
+	dq.normalize();
+	const double w = std::clamp(std::fabs(dq.w()), 0.0, 1.0);
+	return rad2deg(2.0 * std::acos(w));
+}
+
 }  // namespace
 
 Se3HopfCtrl::Se3HopfCtrl()
@@ -69,6 +84,10 @@ Se3HopfCtrl::Se3HopfCtrl()
 		px4_namespace_ + "out/vehicle_imu",
 		rclcpp::SensorDataQoS(),
 		std::bind(&Se3HopfCtrl::imuCallback, this, std::placeholders::_1));
+	sensor_combined_sub_ = create_subscription<px4_msgs::msg::SensorCombined>(
+		px4_namespace_ + "out/sensor_combined",
+		rclcpp::SensorDataQoS(),
+		std::bind(&Se3HopfCtrl::sensorCombinedCallback, this, std::placeholders::_1));
 	status_sub_ = create_subscription<px4_msgs::msg::VehicleStatus>(
 		px4_namespace_ + "out/vehicle_status_v1",
 		rclcpp::SensorDataQoS(),
@@ -139,7 +158,8 @@ void Se3HopfCtrl::loadParameters()
 	enable_auto_arm_ = declare_parameter<bool>("enable_auto_arm", true);
 	auto_takeoff_ = declare_parameter<bool>("auto_takeoff", true);
 	publish_reference_topics_ = declare_parameter<bool>("publish_reference_topics", true);
-	vel_in_body_ = declare_parameter<bool>("velocity_in_body", false);
+	require_imu_for_control_ = declare_parameter<bool>("require_imu_for_control", true);
+	// vel_in_body_ = declare_parameter<bool>("velocity_in_body", false);
 	offboard_warmup_count_ = std::max<int>(
 		1,
 		static_cast<int>(declare_parameter<int64_t>("offboard_warmup_count", 20)));
@@ -147,6 +167,12 @@ void Se3HopfCtrl::loadParameters()
 	takeoff_height_ = declare_parameter<double>("takeoff_height", 2.0);
 	hover_percent_ = declare_parameter<double>("hover_percent", 0.25);
 	max_hover_percent_ = declare_parameter<double>("max_hover_percent", 0.75);
+	tracking_warn_pos_threshold_ = std::max(0.1, declare_parameter<double>("tracking_warn_pos_threshold", 0.8));
+	tracking_warn_vel_threshold_ = std::max(0.1, declare_parameter<double>("tracking_warn_vel_threshold", 1.0));
+	control_warn_bodyrate_threshold_ = std::max(0.1, declare_parameter<double>("control_warn_bodyrate_threshold", 4.0));
+	control_warn_thrust_delta_threshold_ = std::max(0.01, declare_parameter<double>("control_warn_thrust_delta_threshold", 0.35));
+	sample_sync_warn_ms_ = std::max(1.0, declare_parameter<double>("sample_sync_warn_ms", 20.0));
+	odom_imu_quat_warn_deg_ = std::max(0.1, declare_parameter<double>("odom_imu_quat_warn_deg", 8.0));
 
 	geo_fence_(0) = declare_parameter<double>("geo_fence.x", 10.0);
 	geo_fence_(1) = declare_parameter<double>("geo_fence.y", 10.0);
@@ -193,6 +219,50 @@ void Se3HopfCtrl::loadParameters()
 	limit_d_err_p_ = declare_parameter<double>("limit_d_err_p", 3.5);
 	limit_d_err_v_ = declare_parameter<double>("limit_d_err_v", 1.0);
 	limit_d_err_a_ = declare_parameter<double>("limit_d_err_a", 1.0);
+}
+
+void Se3HopfCtrl::logStateInputDiagnostics()
+{
+	if (!odom_received_ || !attitude_received_ || !linear_accel_received_) {
+		return;
+	}
+
+	const auto delta_ms = [](uint64_t newer, uint64_t older) -> double {
+		return static_cast<double>(static_cast<int64_t>(newer) - static_cast<int64_t>(older)) / 1000.0;
+	};
+
+	const double odom_att_ms = delta_ms(last_odom_timestamp_sample_, last_attitude_timestamp_sample_);
+	const double odom_angvel_ms = delta_ms(last_odom_timestamp_sample_, last_angular_velocity_timestamp_sample_);
+	const double odom_imu_ms = delta_ms(last_odom_timestamp_sample_, last_imu_timestamp_sample_);
+	const double att_angvel_ms = delta_ms(last_attitude_timestamp_sample_, last_angular_velocity_timestamp_sample_);
+	const double att_imu_ms = delta_ms(last_attitude_timestamp_sample_, last_imu_timestamp_sample_);
+	const double quat_err_deg = quaternion_angle_deg(odom_data_.q, imu_data_.q);
+
+	if (std::fabs(odom_att_ms) > sample_sync_warn_ms_ ||
+		std::fabs(odom_angvel_ms) > sample_sync_warn_ms_ ||
+		std::fabs(odom_imu_ms) > sample_sync_warn_ms_ ||
+		std::fabs(att_angvel_ms) > sample_sync_warn_ms_ ||
+		std::fabs(att_imu_ms) > sample_sync_warn_ms_ ||
+		quat_err_deg > odom_imu_quat_warn_deg_) {
+		RCLCPP_WARN_THROTTLE(
+			get_logger(),
+			*get_clock(),
+			500,
+			"State input mismatch: pose_frame=%u velocity_frame=%u "
+			"sample_ms(odom-att=%.2f odom-angvel=%.2f odom-imu=%.2f att-angvel=%.2f att-imu=%.2f) "
+			"quat_err_deg=%.2f "
+			"odom_q=(%.3f, %.3f, %.3f, %.3f) imu_q=(%.3f, %.3f, %.3f, %.3f)",
+			static_cast<unsigned>(last_pose_frame_),
+			static_cast<unsigned>(last_velocity_frame_),
+			odom_att_ms,
+			odom_angvel_ms,
+			odom_imu_ms,
+			att_angvel_ms,
+			att_imu_ms,
+			quat_err_deg,
+			odom_data_.q.w(), odom_data_.q.x(), odom_data_.q.y(), odom_data_.q.z(),
+			imu_data_.q.w(), imu_data_.q.x(), imu_data_.q.y(), imu_data_.q.z());
+	}
 }
 
 void Se3HopfCtrl::publishReference() const
@@ -253,6 +323,42 @@ void Se3HopfCtrl::publishVehicleCommand(uint16_t command, float param1, float pa
 	msg.source_component = 1;
 	msg.from_external = true;
 	vehicle_cmd_pub_->publish(msg);
+}
+
+void Se3HopfCtrl::tryBuildImuFromFallback()
+{
+	if (!attitude_received_ || !sensor_combined_received_) {
+		return;
+	}
+
+	if (vehicle_angular_velocity_received_ && vehicle_imu_received_) {
+		return;
+	}
+
+	imu_data_.feed(last_attitude_, last_sensor_combined_);
+	imu_received_ = true;
+	using_sensor_combined_fallback_ = true;
+	angular_velocity_received_ = true;
+	linear_accel_received_ = true;
+	last_angular_velocity_timestamp_sample_ = last_sensor_combined_timestamp_;
+	last_imu_timestamp_sample_ = last_sensor_combined_timestamp_;
+
+	if (!logged_sensor_combined_fallback_) {
+		logged_sensor_combined_fallback_ = true;
+		RCLCPP_WARN(
+			get_logger(),
+			"Using /fmu/out/sensor_combined as IMU fallback because vehicle_angular_velocity and/or vehicle_imu are unavailable.");
+	}
+
+	if (!logged_first_imu_bundle_) {
+		logged_first_imu_bundle_ = true;
+		RCLCPP_INFO(
+			get_logger(),
+			"First IMU bundle ready from sensor_combined fallback: q=(%.3f, %.3f, %.3f, %.3f) bodyrate=(%.3f, %.3f, %.3f) accel=(%.3f, %.3f, %.3f)",
+			imu_data_.q.w(), imu_data_.q.x(), imu_data_.q.y(), imu_data_.q.z(),
+			imu_data_.w(0), imu_data_.w(1), imu_data_.w(2),
+			imu_data_.a(0), imu_data_.a(1), imu_data_.a(2));
+	}
 }
 
 void Se3HopfCtrl::sendCommand(const Controller_Output_t &output, bool publish_orientation) const
@@ -358,6 +464,7 @@ void Se3HopfCtrl::execFSMCallback()
 	flight_state_msg.data = static_cast<int8_t>(flight_state_);
 	flight_state_pub_->publish(flight_state_msg);
 	publishReference();
+	logStateInputDiagnostics();
 
 	if (flight_state_ != prev_flight_state_) {
 		RCLCPP_WARN(
@@ -403,9 +510,63 @@ void Se3HopfCtrl::execFSMCallback()
 	case TAKEOFF:
 	case MISSION_EXECUTION:
 	{
+		const Eigen::Vector3d pos_err = desired_state_.p - odom_data_.p;
+		const Eigen::Vector3d vel_err = desired_state_.v - odom_data_.v;
+		if (pos_err.norm() > tracking_warn_pos_threshold_ || vel_err.norm() > tracking_warn_vel_threshold_) {
+			RCLCPP_WARN_THROTTLE(
+				get_logger(),
+				*get_clock(),
+				500,
+				"Tracking error: state=%s pos=(%.2f, %.2f, %.2f) ref=(%.2f, %.2f, %.2f) pos_err=(%.2f, %.2f, %.2f)|%.2f "
+				"vel=(%.2f, %.2f, %.2f) ref_vel=(%.2f, %.2f, %.2f) vel_err=(%.2f, %.2f, %.2f)|%.2f",
+				flight_state_ == TAKEOFF ? "TAKEOFF" : "MISSION",
+				odom_data_.p(0), odom_data_.p(1), odom_data_.p(2),
+				desired_state_.p(0), desired_state_.p(1), desired_state_.p(2),
+				pos_err(0), pos_err(1), pos_err(2), pos_err.norm(),
+				odom_data_.v(0), odom_data_.v(1), odom_data_.v(2),
+				desired_state_.v(0), desired_state_.v(1), desired_state_.v(2),
+				vel_err(0), vel_err(1), vel_err(2), vel_err.norm());
+		}
+
+		if (require_imu_for_control_ && !imu_received_) {
+			RCLCPP_WARN_THROTTLE(
+				get_logger(),
+				*get_clock(),
+				1000,
+				"IMU bundle not ready, holding neutral command. Expected either vehicle_attitude + vehicle_angular_velocity + vehicle_imu, or sensor_combined fallback.");
+			sendNeutralCommand();
+			break;
+		}
+
 		Controller_Output_t output;
 		if (se3_hopf_.calControl(odom_data_, imu_data_, desired_state_, output)) {
+			const double thrust_delta = std::fabs(output.thrust - last_commanded_thrust_);
+			if (!logged_first_control_output_) {
+				logged_first_control_output_ = true;
+				RCLCPP_INFO(
+					get_logger(),
+					"First control output: thrust=%.3f q=(%.3f, %.3f, %.3f, %.3f) bodyrates=(%.3f, %.3f, %.3f)",
+					output.thrust,
+					output.q.w(), output.q.x(), output.q.y(), output.q.z(),
+					output.bodyrates(0), output.bodyrates(1), output.bodyrates(2));
+			}
+			if (std::fabs(output.bodyrates(0)) > control_warn_bodyrate_threshold_ ||
+				std::fabs(output.bodyrates(1)) > control_warn_bodyrate_threshold_ ||
+				std::fabs(output.bodyrates(2)) > control_warn_bodyrate_threshold_ ||
+				thrust_delta > control_warn_thrust_delta_threshold_) {
+				RCLCPP_WARN_THROTTLE(
+					get_logger(),
+					*get_clock(),
+					500,
+					"Control effort spike: thrust=%.3f d_thrust=%.3f q=(%.3f, %.3f, %.3f, %.3f) bodyrates=(%.3f, %.3f, %.3f) mode=%s",
+					output.thrust,
+					thrust_delta,
+					output.q.w(), output.q.x(), output.q.y(), output.q.z(),
+					output.bodyrates(0), output.bodyrates(1), output.bodyrates(2),
+					command_mode_ == CommandMode::Attitude ? "attitude" : "body_rate");
+			}
 			sendCommand(output, command_mode_ == CommandMode::Attitude);
+			last_commanded_thrust_ = output.thrust;
 			// RCLCPP_INFO_THROTTLE(
 			// 	get_logger(),
 			// 	*get_clock(),
@@ -455,8 +616,23 @@ void Se3HopfCtrl::execFSMCallback()
 
 void Se3HopfCtrl::odomCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
 {
-	const bool velocity_in_body =
-		vel_in_body_ || msg->velocity_frame == px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_BODY_FRD;
+	const bool velocity_in_body = (msg->velocity_frame == px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_BODY_FRD);
+	RCLCPP_INFO_ONCE(
+		get_logger(),
+		"Odometry velocity frame: %s",
+		velocity_in_body ? "BODY_FRD" : "LOCAL_NED");
+	last_odom_timestamp_sample_ = msg->timestamp_sample;
+	last_pose_frame_ = msg->pose_frame;
+	last_velocity_frame_ = msg->velocity_frame;
+	if (!logged_first_odom_frame_info_) {
+		logged_first_odom_frame_info_ = true;
+		RCLCPP_INFO(
+			get_logger(),
+			"VehicleOdometry frame info: pose_frame=%u velocity_frame=%u timestamp_sample=%llu",
+			static_cast<unsigned>(msg->pose_frame),
+			static_cast<unsigned>(msg->velocity_frame),
+			static_cast<unsigned long long>(msg->timestamp_sample));
+	}
 	odom_data_.feed(*msg, velocity_in_body);
 	odom_received_ = true;
 
@@ -471,6 +647,11 @@ void Se3HopfCtrl::odomCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr m
 	const bool judge_z = odom_data_.p(2) >= geo_fence_(2);
 	if ((judge_x || judge_y || judge_z) &&
 		curr_status_.nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND) {
+		RCLCPP_ERROR(
+			get_logger(),
+			"Geofence violated: pos=(%.2f, %.2f, %.2f) fence=(%.2f, %.2f, %.2f), entering EMERGENCY.",
+			odom_data_.p(0), odom_data_.p(1), odom_data_.p(2),
+			geo_fence_(0), geo_fence_(1), geo_fence_(2));
 		flight_state_ = EMERGENCY;
 	}
 }
@@ -478,33 +659,73 @@ void Se3HopfCtrl::odomCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr m
 void Se3HopfCtrl::attitudeCallback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
 {
 	last_attitude_ = *msg;
+	last_attitude_timestamp_sample_ = msg->timestamp_sample;
 	attitude_received_ = true;
 
-	if (angular_velocity_received_ && linear_accel_received_) {
+	if (vehicle_angular_velocity_received_ && vehicle_imu_received_) {
 		imu_data_.feed(last_attitude_, last_angular_velocity_, last_vehicle_imu_);
 		imu_received_ = true;
+		using_sensor_combined_fallback_ = false;
 	}
+
+	tryBuildImuFromFallback();
 }
 
 void Se3HopfCtrl::angularVelocityCallback(const px4_msgs::msg::VehicleAngularVelocity::SharedPtr msg)
 {
 	last_angular_velocity_ = *msg;
+	last_angular_velocity_timestamp_sample_ = msg->timestamp_sample;
+	vehicle_angular_velocity_received_ = true;
 	angular_velocity_received_ = true;
 
-	if (attitude_received_ && linear_accel_received_) {
+	if (attitude_received_ && vehicle_imu_received_) {
 		imu_data_.feed(last_attitude_, last_angular_velocity_, last_vehicle_imu_);
 		imu_received_ = true;
+		using_sensor_combined_fallback_ = false;
+		if (!logged_regular_imu_bundle_) {
+			logged_regular_imu_bundle_ = true;
+			logged_first_imu_bundle_ = true;
+			RCLCPP_INFO(
+				get_logger(),
+				"First IMU bundle ready from vehicle_angular_velocity + vehicle_imu: q=(%.3f, %.3f, %.3f, %.3f) bodyrate=(%.3f, %.3f, %.3f) accel=(%.3f, %.3f, %.3f)",
+				imu_data_.q.w(), imu_data_.q.x(), imu_data_.q.y(), imu_data_.q.z(),
+				imu_data_.w(0), imu_data_.w(1), imu_data_.w(2),
+				imu_data_.a(0), imu_data_.a(1), imu_data_.a(2));
+		}
 	}
 }
 
 void Se3HopfCtrl::imuCallback(const px4_msgs::msg::VehicleImu::SharedPtr msg)
 {
 	last_vehicle_imu_ = *msg;
+	last_imu_timestamp_sample_ = msg->timestamp_sample;
+	vehicle_imu_received_ = true;
 	linear_accel_received_ = true;
 
-	if (attitude_received_ && angular_velocity_received_) {
+	if (attitude_received_ && vehicle_angular_velocity_received_) {
 		imu_data_.feed(last_attitude_, last_angular_velocity_, last_vehicle_imu_);
 		imu_received_ = true;
+		using_sensor_combined_fallback_ = false;
+		if (!logged_regular_imu_bundle_) {
+			logged_regular_imu_bundle_ = true;
+			logged_first_imu_bundle_ = true;
+			RCLCPP_INFO(
+				get_logger(),
+				"First IMU bundle ready from vehicle_angular_velocity + vehicle_imu: q=(%.3f, %.3f, %.3f, %.3f) bodyrate=(%.3f, %.3f, %.3f) accel=(%.3f, %.3f, %.3f)",
+				imu_data_.q.w(), imu_data_.q.x(), imu_data_.q.y(), imu_data_.q.z(),
+				imu_data_.w(0), imu_data_.w(1), imu_data_.w(2),
+				imu_data_.a(0), imu_data_.a(1), imu_data_.a(2));
+		}
+	}
+}
+
+void Se3HopfCtrl::sensorCombinedCallback(const px4_msgs::msg::SensorCombined::SharedPtr msg)
+{
+	last_sensor_combined_ = *msg;
+	last_sensor_combined_timestamp_ = msg->timestamp;
+	sensor_combined_received_ = true;
+	if (!vehicle_angular_velocity_received_ || !vehicle_imu_received_ || using_sensor_combined_fallback_) {
+		tryBuildImuFromFallback();
 	}
 }
 
@@ -512,6 +733,15 @@ void Se3HopfCtrl::statusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr m
 {
 	curr_status_ = *msg;
 	status_received_ = true;
+	RCLCPP_INFO_THROTTLE(
+		get_logger(),
+		*get_clock(),
+		2000,
+		"PX4 status: nav_state=%u arming_state=%u failsafe=%s pre_flight_checks=%s",
+		curr_status_.nav_state,
+		curr_status_.arming_state,
+		curr_status_.failsafe ? "true" : "false",
+		curr_status_.pre_flight_checks_pass ? "true" : "false");
 	if (curr_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND && !landing_locked_) {
 		landing_locked_ = true;
 		RCLCPP_WARN(get_logger(), "Landing lock enabled (PX4 AUTO_LAND detected).");
@@ -524,7 +754,6 @@ void Se3HopfCtrl::multiDOFJointCallback(const trajectory_msgs::msg::MultiDOFJoin
 		RCLCPP_WARN(get_logger(), "Received empty trajectory message.");
 		return;
 	}
-	RCLCPP_INFO_ONCE(get_logger(), "Received trajectory message with %zu points.", msg->points.size());
 
 	const auto &pt = msg->points.front();
 	const auto &transform = pt.transforms.front();
@@ -558,4 +787,15 @@ void Se3HopfCtrl::multiDOFJointCallback(const trajectory_msgs::msg::MultiDOFJoin
 	desired_state_.q.normalize();
 	desired_state_.yaw = utils::fromQuaternion2yaw(desired_state_.q);
 	desired_state_.yaw_rate = 0.0;
+
+	RCLCPP_INFO_THROTTLE(
+		get_logger(),
+		*get_clock(),
+		200,
+		"Trajectory command: points=%zu pos=(%.2f, %.2f, %.2f) vel=(%.2f, %.2f, %.2f) acc=(%.2f, %.2f, %.2f) yaw=%.2f",
+		msg->points.size(),
+		desired_state_.p(0), desired_state_.p(1), desired_state_.p(2),
+		desired_state_.v(0), desired_state_.v(1), desired_state_.v(2),
+		desired_state_.a(0), desired_state_.a(1), desired_state_.a(2),
+		desired_state_.yaw);
 }

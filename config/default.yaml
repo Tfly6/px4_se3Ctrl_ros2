@@ -5,13 +5,20 @@ se3_hopf_node:
     enable_auto_offboard: true
     enable_auto_arm: true
     auto_takeoff: true
+    require_imu_for_control: true
     publish_reference_topics: true
-    velocity_in_body: false
+    # velocity_in_body: true
     offboard_warmup_count: 20
     request_interval: 1.0
     takeoff_height: 2.0
     hover_percent: 0.25
     max_hover_percent: 0.75
+    tracking_warn_pos_threshold: 0.8
+    tracking_warn_vel_threshold: 1.0
+    control_warn_bodyrate_threshold: 4.0
+    control_warn_thrust_delta_threshold: 0.35
+    sample_sync_warn_ms: 20.0
+    odom_imu_quat_warn_deg: 8.0
 
     geo_fence.x: 80.0
     geo_fence.y: 80.0
