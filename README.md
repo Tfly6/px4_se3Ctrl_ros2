@@ -1,110 +1,122 @@
-# se3_ctrl
+# se3_hopf
 
-`se3_ctrl` 面向 PX4 ROS2(Humble) + Micro XRCE Agent 的 Offboard 控制链路。
+ROS 2 Humble SE(3) geometric controller with Hopf fibration for PX4 offboard control.
 
-当前版本特性：
+## Features
 
-- 订阅 PX4 XRCE 话题：
-  - `/fmu/out/vehicle_odometry`
-  - `/fmu/out/vehicle_attitude`
-  - `/fmu/out/vehicle_angular_velocity`
-  - `/fmu/out/vehicle_imu`
-  - `/fmu/out/vehicle_status_v1`
-- 订阅上层轨迹：
-  - `/command/trajectory` (`trajectory_msgs/msg/MultiDOFJointTrajectory`)
-- 发布 Offboard 控制：
-  - `/fmu/in/offboard_control_mode`
-  - `/fmu/in/vehicle_attitude_setpoint`
-  - `/fmu/in/vehicle_rates_setpoint`
-  - `/fmu/in/vehicle_command`
-- 保留状态机：
-  - 等待 PX4 数据
-  - 预热 Offboard setpoint
-  - 自动切 OFFBOARD
-  - 自动 ARM
-  - 自动 TAKEOFF / 任务执行 / LAND
-- 保留 `/land` 服务：`std_srvs/srv/SetBool`
+- **SE(3) geometric controller** based on Hopf fibration, with full position-velocity-acceleration error feedback and derivative control
+- **Dual IMU input paths** — primary from `vehicle_angular_velocity` + `vehicle_imu`; automatic fallback to `sensor_combined` (gyro + accelerometer) when those topics are unavailable
+- **Runtime diagnostics** — tracking error threshold warnings, control effort spike detection, sample timestamp synchronisation monitoring, odometry/attitude quaternion discrepancy checks
+- **Safety** — configurable geo-fence with automatic emergency landing; IMU readiness gate holding neutral command until sensor bundle is ready
+- **State machine** — WAITING_FOR_CONNECTED → OFFBOARD → ARM → TAKEOFF → MISSION_EXECUTION → LAND → LANDED, with EMERGENCY handling
+- Dual output mode: `attitude` (default) or `body_rate`
 
-## 坐标系
+### Subscribed topics (PX4 XRCE)
 
-- 节点固定假设接收的是 PX4 原生 NED/FRD 数据
-- 控制器内部统一转换到 ENU 计算，再转换回 PX4 所需的姿态/角速度输出
-- IMU 语义按 ROS1 MAVROS 路线对齐：
-  - 姿态来自 `vehicle_attitude`
-  - 角速度来自 `vehicle_angular_velocity`
-  - 线加速度来自 `vehicle_imu`
-- 因此上层通过 `/command/trajectory` 输入的轨迹应按 ROS 常用 ENU 语义给定
+| Topic | Type |
+|-------|------|
+| `/fmu/out/vehicle_odometry` | `px4_msgs/msg/VehicleOdometry` |
+| `/fmu/out/vehicle_attitude` | `px4_msgs/msg/VehicleAttitude` |
+| `/fmu/out/vehicle_angular_velocity` | `px4_msgs/msg/VehicleAngularVelocity` |
+| `/fmu/out/vehicle_imu` | `px4_msgs/msg/VehicleImu` |
+| `/fmu/out/sensor_combined` | `px4_msgs/msg/SensorCombined` (fallback IMU) |
+| `/fmu/out/vehicle_status_v1` | `px4_msgs/msg/VehicleStatus` |
+| `/command/trajectory` | `trajectory_msgs/msg/MultiDOFJointTrajectory` |
 
-## 输出模式
+### Published topics
 
-通过参数 `control_mode` 选择：
+| Topic | Type |
+|-------|------|
+| `/fmu/in/offboard_control_mode` | `px4_msgs/msg/OffboardControlMode` |
+| `/fmu/in/vehicle_attitude_setpoint` | `px4_msgs/msg/VehicleAttitudeSetpoint` |
+| `/fmu/in/vehicle_rates_setpoint` | `px4_msgs/msg/VehicleRatesSetpoint` |
+| `/fmu/in/vehicle_command` | `px4_msgs/msg/VehicleCommand` |
+| `/flight_state` | `std_msgs/msg/Int8` |
+| `/controller/reference_pose` | `geometry_msgs/msg/PoseStamped` |
+| `/controller/reference_velocity` | `geometry_msgs/msg/TwistStamped` |
+| `/controller/reference_accel` | `geometry_msgs/msg/AccelStamped` |
 
-- `attitude` (默认)
-  - 发布 `px4_msgs/msg/VehicleAttitudeSetpoint`
-- `body_rate`
-  - 发布 `px4_msgs/msg/VehicleRatesSetpoint`
+### Services
 
-两种模式都使用算法输出的归一化推力，并映射到 PX4 期望的 `thrust_body[2]`。
+- `/land` — `std_srvs/srv/SetBool`
 
-## 下载
+## Coordinate frames
+
+- Input assumed to be PX4 native NED/FRD; internally transformed to ENU for computation, then converted back to PX4 attitude/bodyrate output
+- Trajectory via `/command/trajectory` should be given in ROS-standard ENU semantics
+- IMU pipeline:
+  - Attitude: `vehicle_attitude`
+  - Angular velocity: `vehicle_angular_velocity` (or `sensor_combined.gyro_rad`)
+  - Linear acceleration: `vehicle_imu` (or `sensor_combined.accelerometer_m_s2`)
+
+## Installation
 
 ```bash
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
 git clone https://github.com/Tfly6/px4_se3Ctrl_ros2.git
-# px4_msgs 包必须要装上，如果有可以跳过下载 
+# Required: px4_msgs
 git clone https://github.com/PX4/px4_msgs.git
 ```
 
-## 编译
+## Build
 
 ```bash
 cd ~/ros2_ws
-colcon build
-#colcon build --packages-select se3_hopf
+colcon build --packages-select se3_hopf
 source install/setup.bash
 ```
 
-## 启动
-> 启动之前必须确保官方 ROS2 Offboard 案例是可以跑通的
+## Usage
 
-**打开QGC地面站**  
-- 启动 PX4 SITL
+> Make sure the official ROS 2 Offboard example works before first use.
+
+1. Start PX4 SITL:
 ```bash
 cd <PX4_DIR>
 make px4_sitl gz_x500
 ```
-- 启动通信
+
+2. Start Micro XRCE Agent:
 ```bash
 MicroXRCEAgent udp4 -p 8888
 ```
-- 启动控制器
+
+3. Launch controller:
 ```bash
-cd ~/ros2_ws
-source install/setup.bash
 ros2 launch se3_hopf se3_hopf.launch.py
 ```
 
-或直接运行：
-
+Or run directly:
 ```bash
-ros2 run se3_hopf se3_hopf_node --ros-args --params-file src/px4_se3Ctrl_ros2/config/default.yaml
+ros2 run se3_hopf se3_hopf_node --ros-args --params-file src/se3_hopf/config/default.yaml
 ```
 
-## 常用参数
+## Parameters
 
-- `px4_namespace`：默认 `/fmu/`
-- `control_mode`：`attitude` 或 `body_rate`
-- `enable_auto_offboard`
-- `enable_auto_arm`
-- `auto_takeoff`
-- `takeoff_height`
-- `hover_percent`
-- `max_hover_percent`
-- `geo_fence.x/y/z`
+See [config/default.yaml](./config/default.yaml) for full defaults.
 
-参数默认值见 [config/default.yaml](./config/default.yaml)。
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `px4_namespace` | `/fmu/` | PX4 topic namespace |
+| `control_mode` | `attitude` | Output mode: `attitude` or `body_rate` |
+| `require_imu_for_control` | `true` | Hold neutral command until IMU bundle ready |
+| `enable_auto_offboard` | `true` | Automatically switch to OFFBOARD mode |
+| `enable_auto_arm` | `true` | Automatically arm |
+| `auto_takeoff` | `true` | Automatically take off after arm |
+| `takeoff_height` | `2.0` | Takeoff altitude (m) |
+| `hover_percent` / `max_hover_percent` | `0.25` / `0.75` | Thrust mapping range |
+| `geo_fence.x/y/z` | `80.0` / `80.0` / `7.0` | Position boundary (m) |
+| `tracking_warn_pos_threshold` | `0.8` | Position tracking warning (m) |
+| `tracking_warn_vel_threshold` | `1.0` | Velocity tracking warning (m/s) |
+| `control_warn_bodyrate_threshold` | `4.0` | Bodyrate spike warning (rad/s) |
+| `control_warn_thrust_delta_threshold` | `0.35` | Thrust step warning (normalised) |
+| `sample_sync_warn_ms` | `20.0` | Sample timestamp diff warning (ms) |
+| `odom_imu_quat_warn_deg` | `8.0` | Odom-IMU quaternion mismatch warning (deg) |
 
-## 参考
-[HITSZ-MAS/se3_controller: SE(3) Controller for Quadrotor](https://github.com/HITSZ-MAS/se3_controller)  
-[Tfly6/OpenDrone: PX4 and ROS1 SITL](https://github.com/Tfly6/OpenDrone)
+And full set of `kp_px/py/pz`, `kp_vx/vy/vz`, `kp_ax/ay/az`, `kp_qx/qy/qz`, `kp_wx/wy/wz` gains with their derivative counterparts `kd_*`, plus error/derivative limits `limit_err_p/v/a`, `limit_d_err_p/v/a`.
+
+## References
+
+- [HITSZ-MAS/se3_controller](https://github.com/HITSZ-MAS/se3_controller) — Original SE(3) controller
+- [Tfly6/OpenDrone](https://github.com/Tfly6/OpenDrone) — PX4 and ROS SITL framework
