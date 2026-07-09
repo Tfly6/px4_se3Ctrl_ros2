@@ -71,6 +71,8 @@ source install/setup.bash
 
 > Make sure the official ROS 2 Offboard example works before first use.
 
+**Open QGC before start SITL**
+
 1. Start PX4 SITL:
 ```bash
 cd <PX4_DIR>
