@@ -119,9 +119,14 @@ Se3HopfCtrl::Se3HopfCtrl()
 
 	RCLCPP_INFO(
 		get_logger(),
-		"se3_hopf ROS 2 node started. PX4 namespace: %s, control mode: %s, imu input: vehicle_attitude + vehicle_angular_velocity + vehicle_imu",
+		"se3_hopf ROS 2 node started. PX4 namespace: %s, control mode: %s",
 		px4_namespace_.c_str(),
 		command_mode_ == CommandMode::Attitude ? "attitude" : "body_rate");
+	if (debug_log_) {
+		RCLCPP_INFO(
+			get_logger(),
+			"Debug logging enabled. IMU input chain: vehicle_attitude + vehicle_angular_velocity + vehicle_imu, fallback: sensor_combined");
+	}
 }
 
 std::string Se3HopfCtrl::state2string(FlightState state) const
@@ -157,6 +162,7 @@ void Se3HopfCtrl::loadParameters()
 	enable_auto_offboard_ = declare_parameter<bool>("enable_auto_offboard", true);
 	enable_auto_arm_ = declare_parameter<bool>("enable_auto_arm", true);
 	auto_takeoff_ = declare_parameter<bool>("auto_takeoff", true);
+	debug_log_ = declare_parameter<bool>("debug_log", false);
 	publish_reference_topics_ = declare_parameter<bool>("publish_reference_topics", true);
 	require_imu_for_control_ = declare_parameter<bool>("require_imu_for_control", true);
 	// vel_in_body_ = declare_parameter<bool>("velocity_in_body", false);
@@ -223,6 +229,10 @@ void Se3HopfCtrl::loadParameters()
 
 void Se3HopfCtrl::logStateInputDiagnostics()
 {
+	if (!debug_log_) {
+		return;
+	}
+
 	if (!odom_received_ || !attitude_received_ || !linear_accel_received_) {
 		return;
 	}
@@ -350,7 +360,7 @@ void Se3HopfCtrl::tryBuildImuFromFallback()
 			"Using /fmu/out/sensor_combined as IMU fallback because vehicle_angular_velocity and/or vehicle_imu are unavailable.");
 	}
 
-	if (!logged_first_imu_bundle_) {
+	if (debug_log_ && !logged_first_imu_bundle_) {
 		logged_first_imu_bundle_ = true;
 		RCLCPP_INFO(
 			get_logger(),
@@ -512,7 +522,8 @@ void Se3HopfCtrl::execFSMCallback()
 	{
 		const Eigen::Vector3d pos_err = desired_state_.p - odom_data_.p;
 		const Eigen::Vector3d vel_err = desired_state_.v - odom_data_.v;
-		if (pos_err.norm() > tracking_warn_pos_threshold_ || vel_err.norm() > tracking_warn_vel_threshold_) {
+		if (debug_log_ &&
+			(pos_err.norm() > tracking_warn_pos_threshold_ || vel_err.norm() > tracking_warn_vel_threshold_)) {
 			RCLCPP_WARN_THROTTLE(
 				get_logger(),
 				*get_clock(),
@@ -541,7 +552,7 @@ void Se3HopfCtrl::execFSMCallback()
 		Controller_Output_t output;
 		if (se3_hopf_.calControl(odom_data_, imu_data_, desired_state_, output)) {
 			const double thrust_delta = std::fabs(output.thrust - last_commanded_thrust_);
-			if (!logged_first_control_output_) {
+			if (debug_log_ && !logged_first_control_output_) {
 				logged_first_control_output_ = true;
 				RCLCPP_INFO(
 					get_logger(),
@@ -550,10 +561,11 @@ void Se3HopfCtrl::execFSMCallback()
 					output.q.w(), output.q.x(), output.q.y(), output.q.z(),
 					output.bodyrates(0), output.bodyrates(1), output.bodyrates(2));
 			}
-			if (std::fabs(output.bodyrates(0)) > control_warn_bodyrate_threshold_ ||
-				std::fabs(output.bodyrates(1)) > control_warn_bodyrate_threshold_ ||
-				std::fabs(output.bodyrates(2)) > control_warn_bodyrate_threshold_ ||
-				thrust_delta > control_warn_thrust_delta_threshold_) {
+			if (debug_log_ &&
+				(std::fabs(output.bodyrates(0)) > control_warn_bodyrate_threshold_ ||
+				 std::fabs(output.bodyrates(1)) > control_warn_bodyrate_threshold_ ||
+				 std::fabs(output.bodyrates(2)) > control_warn_bodyrate_threshold_ ||
+				 thrust_delta > control_warn_thrust_delta_threshold_)) {
 				RCLCPP_WARN_THROTTLE(
 					get_logger(),
 					*get_clock(),
@@ -567,18 +579,6 @@ void Se3HopfCtrl::execFSMCallback()
 			}
 			sendCommand(output, command_mode_ == CommandMode::Attitude);
 			last_commanded_thrust_ = output.thrust;
-			// RCLCPP_INFO_THROTTLE(
-			// 	get_logger(),
-			// 	*get_clock(),
-			// 	1000,
-			// 	"%s z=%.2f z_sp=%.2f thrust=%.3f rates=[%.2f %.2f %.2f]",
-			// 	flight_state_ == TAKEOFF ? "TAKEOFF" : "MISSION",
-			// 	odom_data_.p(2),
-			// 	desired_state_.p(2),
-			// 	output.thrust,
-			// 	output.bodyrates(0),
-			// 	output.bodyrates(1),
-			// 	output.bodyrates(2));
 			se3_hopf_.estimateTa(imu_data_.a);
 		} else {
 			RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Control output not valid, sending neutral command.");
@@ -617,14 +617,16 @@ void Se3HopfCtrl::execFSMCallback()
 void Se3HopfCtrl::odomCallback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
 {
 	const bool velocity_in_body = (msg->velocity_frame == px4_msgs::msg::VehicleOdometry::VELOCITY_FRAME_BODY_FRD);
-	RCLCPP_INFO_ONCE(
-		get_logger(),
-		"Odometry velocity frame: %s",
-		velocity_in_body ? "BODY_FRD" : "LOCAL_NED");
+	if (debug_log_) {
+		RCLCPP_INFO_ONCE(
+			get_logger(),
+			"Odometry velocity frame: %s",
+			velocity_in_body ? "BODY_FRD" : "LOCAL_NED");
+	}
 	last_odom_timestamp_sample_ = msg->timestamp_sample;
 	last_pose_frame_ = msg->pose_frame;
 	last_velocity_frame_ = msg->velocity_frame;
-	if (!logged_first_odom_frame_info_) {
+	if (debug_log_ && !logged_first_odom_frame_info_) {
 		logged_first_odom_frame_info_ = true;
 		RCLCPP_INFO(
 			get_logger(),
@@ -682,7 +684,7 @@ void Se3HopfCtrl::angularVelocityCallback(const px4_msgs::msg::VehicleAngularVel
 		imu_data_.feed(last_attitude_, last_angular_velocity_, last_vehicle_imu_);
 		imu_received_ = true;
 		using_sensor_combined_fallback_ = false;
-		if (!logged_regular_imu_bundle_) {
+		if (debug_log_ && !logged_regular_imu_bundle_) {
 			logged_regular_imu_bundle_ = true;
 			logged_first_imu_bundle_ = true;
 			RCLCPP_INFO(
@@ -706,7 +708,7 @@ void Se3HopfCtrl::imuCallback(const px4_msgs::msg::VehicleImu::SharedPtr msg)
 		imu_data_.feed(last_attitude_, last_angular_velocity_, last_vehicle_imu_);
 		imu_received_ = true;
 		using_sensor_combined_fallback_ = false;
-		if (!logged_regular_imu_bundle_) {
+		if (debug_log_ && !logged_regular_imu_bundle_) {
 			logged_regular_imu_bundle_ = true;
 			logged_first_imu_bundle_ = true;
 			RCLCPP_INFO(
@@ -733,15 +735,17 @@ void Se3HopfCtrl::statusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr m
 {
 	curr_status_ = *msg;
 	status_received_ = true;
-	RCLCPP_INFO_THROTTLE(
-		get_logger(),
-		*get_clock(),
-		2000,
-		"PX4 status: nav_state=%u arming_state=%u failsafe=%s pre_flight_checks=%s",
-		curr_status_.nav_state,
-		curr_status_.arming_state,
-		curr_status_.failsafe ? "true" : "false",
-		curr_status_.pre_flight_checks_pass ? "true" : "false");
+	if (debug_log_) {
+		RCLCPP_INFO_THROTTLE(
+			get_logger(),
+			*get_clock(),
+			2000,
+			"PX4 status: nav_state=%u arming_state=%u failsafe=%s pre_flight_checks=%s",
+			curr_status_.nav_state,
+			curr_status_.arming_state,
+			curr_status_.failsafe ? "true" : "false",
+			curr_status_.pre_flight_checks_pass ? "true" : "false");
+	}
 	if (curr_status_.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND && !landing_locked_) {
 		landing_locked_ = true;
 		RCLCPP_WARN(get_logger(), "Landing lock enabled (PX4 AUTO_LAND detected).");
@@ -788,14 +792,16 @@ void Se3HopfCtrl::multiDOFJointCallback(const trajectory_msgs::msg::MultiDOFJoin
 	desired_state_.yaw = utils::fromQuaternion2yaw(desired_state_.q);
 	desired_state_.yaw_rate = 0.0;
 
-	RCLCPP_INFO_THROTTLE(
-		get_logger(),
-		*get_clock(),
-		200,
-		"Trajectory command: points=%zu pos=(%.2f, %.2f, %.2f) vel=(%.2f, %.2f, %.2f) acc=(%.2f, %.2f, %.2f) yaw=%.2f",
-		msg->points.size(),
-		desired_state_.p(0), desired_state_.p(1), desired_state_.p(2),
-		desired_state_.v(0), desired_state_.v(1), desired_state_.v(2),
-		desired_state_.a(0), desired_state_.a(1), desired_state_.a(2),
-		desired_state_.yaw);
+	if (debug_log_) {
+		RCLCPP_INFO_THROTTLE(
+			get_logger(),
+			*get_clock(),
+			200,
+			"Trajectory command: points=%zu pos=(%.2f, %.2f, %.2f) vel=(%.2f, %.2f, %.2f) acc=(%.2f, %.2f, %.2f) yaw=%.2f",
+			msg->points.size(),
+			desired_state_.p(0), desired_state_.p(1), desired_state_.p(2),
+			desired_state_.v(0), desired_state_.v(1), desired_state_.v(2),
+			desired_state_.a(0), desired_state_.a(1), desired_state_.a(2),
+			desired_state_.yaw);
+	}
 }

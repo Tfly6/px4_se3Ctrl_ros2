@@ -5,6 +5,7 @@ se3_hopf_node:
     enable_auto_offboard: true
     enable_auto_arm: true
     auto_takeoff: true
+    debug_log: true
     require_imu_for_control: true
     publish_reference_topics: true
     # velocity_in_body: true

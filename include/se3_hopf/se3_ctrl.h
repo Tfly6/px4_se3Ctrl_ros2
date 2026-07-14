@@ -93,6 +93,7 @@ private:
 	bool enable_auto_offboard_{true};
 	bool enable_auto_arm_{true};
 	bool auto_takeoff_{true};
+	bool debug_log_{false};
 	bool require_imu_for_control_{true};
 	bool using_sensor_combined_fallback_{false};
 	bool publish_reference_topics_{true};
